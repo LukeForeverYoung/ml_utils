@@ -23,7 +23,7 @@ class TimeCoster():
     def print_time(self,s):
         print('cost {:.2g} s'.format(s))
 
-class TrainUtil():
+class LossUtil():
     def __init__(self,print_limit=100):
         self.print_limit=print_limit
         self.clear()
@@ -41,9 +41,11 @@ class TrainUtil():
 
     def print_loss(self):
         print('ep:{0} loss:{1}'.format(self.epoch, self.loss_sum))
+
+
 if __name__ == '__main__':
 
-    train_hp=TrainUtil(10)
+    train_hp=LossUtil(10)
     for i in range(100):
         train_hp.add_loss(10)
     input()
