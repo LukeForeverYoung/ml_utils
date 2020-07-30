@@ -83,8 +83,7 @@ class Trainer():
         ground=torch.cat(ground,dim=0)
         info['loss']=tot_loss
         info['train_acc']=self.evaluator(pred,ground)['score']
-        print(info['loss'])
-        #print('train_acc:',info['train_acc'])
+
         self.train_history.append({'loss':tot_loss})
         vinfo=self.valid()
         if vinfo['score']>info['best_score']:
@@ -117,7 +116,6 @@ class Trainer():
         if not isinstance(vinfo,dict):
             vinfo={'score':vinfo}
         
-        print(vinfo)
         return vinfo
 
     def cuda_data(self,data):
