@@ -2,6 +2,33 @@ import torch
 from collections import Iterable
 from tqdm import tqdm
 from os.path import join
+import argparse
+from torch import nn
+import numpy as np
+import random
+import math
+from pathlib import Path
+import logging
+from logging import getLogger,FileHandler,StreamHandler,Formatter
+def set_seed(seed,cudnn_fixed=False):
+    import random
+    import numpy as np
+    import torch
+    random.seed(seed)
+    np.random.seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+    # Remove randomness (may be slower on Tesla GPUs) 
+    # https://pytorch.org/docs/stable/notes/randomness.html
+    if cudnn_fixed:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
 class OptimizerUtil():
     def __init__(self,lr,optimizer):
         self.lr=lr
@@ -125,122 +152,119 @@ class Initializer(object):
     
 
 class Trainer():
-    def __init__(self,model,loaders,optimizer,save_path,evaluator,stop_mode='noincrease',threshold=5,cuda_convertor=None,logger=None,device='cuda'):
+    def __init__(self,model,t_dataloader,v_dataloader,args):
+        self.args=args
+        self.runtime=argparse.Namespace()
         self.model=model
-        self.train_loader=loaders['train'] if 'train' in loaders else None
-        self.valid_loader=loaders['valid'] if 'valid' in loaders else None
-        self.test_loader=loaders['test'] if 'test' in loaders else None
-        self.optimizer=optimizer
-        self.stop_mode=stop_mode
-        self.threshold=threshold
-        self.logger=logger
-        self.device=device
-        self.save_path=save_path
-        self.evaluator=evaluator
-        self.cuda_convertor=cuda_convertor
-        self.train_history=[]
-        if self.device:
-            self.model.to(self.device)
-    
-    def init(self,):
-        if self.device is not 'cpu':
-            self.model.to(self.device)
-    
+        self.model.cuda()
+        self.t_dataloader=t_dataloader
+        self.v_dataloader=v_dataloader
+        self.loss_fn=None # 需要编写
+        self.optimizer=None # 需要编写
+        
+        num_step_epoch=len(t_dataloader)
+        self.lr_scheduler = None # 需要编写
+       
+        from time import strftime,localtime
+        self.time_token=strftime("%Y-%m-%d[%H_%M_%S]", localtime())
+        self.__set_logger()
+        print(self.logger.handlers)
+
+
     def train(self,):
-        info={}
-        info['best_ep']=0
-        info['best_score']=0
-        self.train_history=[]
-        if self.stop_mode is not 'noincrease':
-            for ep in range(self.threshold):
-                info['ep']=ep
-                self.train_body(info)
-        else:
-            ep=0
-            info['stop_cnt']=self.threshold
-            while True:
-                info['ep']=ep
-                self.train_body(info)
-                if info['stop_cnt']==0:
-                    break
-                ep+=1
-        
-        
-    def train_body(self,info):
-        self.model.train()
-        tot_loss=0
-        pred=[]
-        ground=[]
-        for bi,(data,target) in enumerate(self.train_loader):
-            self.optimizer.zero_grad()
-            data,target=self.cuda_data((data,target))
-            res=self.model.forward(data)
-            pred.append(torch.argmax(res,dim=1).detach().cpu())
-            ground.append(target.detach().cpu())
-            loss=self.model.loss(res,target)
-            loss.backward()
-            self.optimizer.step()
-            tot_loss+=loss.item()
-        pred=torch.cat(pred,dim=0)
-        ground=torch.cat(ground,dim=0)
-        info['loss']=tot_loss
-        info['train_acc']=self.evaluator(pred,ground)['score']
+        self.runtime.epoch=0
+        self.runtime.bad_epoch=0
+        self.runtime.best_loss=math.inf
+        valid_res={'valid_loss':math.inf}
+        self.valid()
+        while True:
+            self.model.train()
+            for bi,batch in enumerate(self.t_dataloader):
+                # Train Loop
+                '''
+                batch={_:batch[_].cuda() for _ in batch if'exp_' not in _}
+                inp={_:batch[_] for _ in batch if _!='ground_truth' and 'exp_' not in _}
+                ground_truth=batch['ground_truth']
+                output=self.model(**inp)
+                loss=calculate_loss_and_accuracy(output,ground_truth)
+                self.optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 0.2)
+                self.optimizer.step()
+                self.lr_scheduler.step()
 
-        self.train_history.append({'loss':tot_loss})
-        vinfo=self.valid()
-        if vinfo['score']>info['best_score']:
-            info['best_score']=vinfo['score']
-            info['best_ep']=info['ep']
-            if self.stop_mode=='noincrease':
-                info['stop_cnt']-=1
-        else:
-            if self.stop_mode=='noincrease':
-                info['stop_cnt']=self.threshold
-            self.save()
-    
-    def valid(self,loader=None):
-        self.model.eval()
-        vinfo={}
-        if loader is None:
-            loader=self.valid_loader
-        pred=[]
-        ground=[]
-        with torch.no_grad():
-            for bi,(data,target) in enumerate(tqdm(loader)):
-                data=self.cuda_data(data)
-                res=self.model.tforward(data)
-                pred.append(res.detach().cpu())
-                ground.append(target.detach().cpu())
-            pred=torch.cat(pred,dim=0)
-            ground=torch.cat(ground,dim=0)
-
-            vinfo=self.evaluator(pred,ground)
-        if not isinstance(vinfo,dict):
-            vinfo={'score':vinfo}
-        
-        return vinfo
-
-    def cuda_data(self,data):
-        if not torch.is_tensor(data):
-            res=tuple([self.cuda_convertor(d) if self.cuda_convertor else d.to(self.device) for d in data])
-            return res
-        else:
-            if self.cuda_convertor:
-                return self.cuda_convertor(data)
+                self.logger.info(f'ep:{self.runtime.epoch} {bi}/{len(self.t_dataloader)}, Loss:{loss.item():.4f}, Valid Loss:{valid_res["valid_loss"]:.4f}')
+                '''
+            valid_res=self.valid()
+            if valid_res['valid_loss']<self.runtime.best_loss:
+                self.runtime.bad_epoch=0
+                self.runtime.best_loss=valid_res['valid_loss']
             else:
-                return data.to(self.device)
+                self.runtime.bad_epoch+=1
+            
+            if self.runtime.bad_epoch>self.args.num_epoch:
+                break
+            #self.save(self.runtime.epoch)
+            self.save() # 覆盖
+            self.runtime.epoch+=1
 
+    def valid(self,):
+        self.model.eval()
+        tot_loss=0
 
-    def save(self,):
-        with open(join(self.save_path,'best.pkl'),'wb')as f:
-            torch.save(self.model.state_dict(), f)
+        with torch.no_grad():
+            for bi,batch in enumerate(self.v_dataloader):
+                # Valid Loop
+                '''
+                batch={_:batch[_].cuda() for _ in batch if'exp_' not in _}
+                inp={_:batch[_] for _ in batch if _!='ground_truth' and 'exp_' not in _}
+                ground_truth=batch['ground_truth']
+                output=self.model(**inp)
+                loss=calculate_loss_and_accuracy(output,ground_truth)
+                tot_loss+=loss.item()
+                '''
+
+        return {'valid_loss':tot_loss}
+
+    def save(self,epoch=None):
+        suffix='checkpoint'
+        if epoch is not None:
+            suffix=f'checkpoint_{epoch}'
+        
+        output_dir=Path(self.args.output_dir,self.time_token,suffix)
+        output_dir.mkdir(parents=True,exist_ok=True)
+        
+        self.logger.info("Saving model checkpoint to %s", output_dir)
+        checkpoint={
+            'args':self.args,
+            'runtime':self.runtime,
+            'model_state_dict':self.model.state_dict(),
+            'optimizer_state_dict':self.optimizer.state_dict(),
+        }
+        # 保存参数
+        torch.save(checkpoint, Path(output_dir, "checkpoint.bin"))
+    
     def load(self,path):
-        if type(path) is str:
-            self.model.load_state_dict(torch.load(path))
-        else:
-            with open(path,'rb')as f:
-                self.model.load_state_dict(torch.load(f))
+        checkpoint=torch.load(path)
+        self.args=checkpoint['args']
+        self.runtime=checkpoint['runtime']
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
+    def __set_logger(self,):
+        self.logger=getLogger('luke')
+        self.logger.setLevel(logging.INFO) # windows下默认为warning, linux下默认为Info
+
+        self.logger.propagate=False # 避免被transformers库中的logger配置污染
+        formatter = Formatter('%(asctime)s [%(levelname)s] %(message)s',"%Y-%m-%d %H:%M:%S")
+        log_dir=Path('log')
+        log_dir.mkdir(parents=True,exist_ok=True)
+        fh=FileHandler(Path(log_dir,f'{self.time_token}.log'))
+        fh.setFormatter(formatter)
+        sh=StreamHandler()
+        sh.setFormatter(formatter)
+        self.logger.addHandler(fh)
+        self.logger.addHandler(sh)
 
 if __name__=='__main__':
     a=torch.tensor([0.7,0.2,0.9,0.8])
