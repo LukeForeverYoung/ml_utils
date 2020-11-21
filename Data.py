@@ -1,3 +1,12 @@
+from random import shuffle
+def split_dataset(data,train_rate=0.8):
+    shuffle(data)
+    dl=len(data)
+    return {
+        'train':data[:int(dl*train_rate)],
+        'valid':data[int(dl*train_rate):int(dl*(train_rate+1)/2)],
+        'test':data[int(dl*(train_rate+1)/2):],
+    }
 class BatchDataLoader():
     def __init__(self,data,batch_size):
         self.__data=list(data)
