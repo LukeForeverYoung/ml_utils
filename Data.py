@@ -1,4 +1,16 @@
 from random import shuffle
+
+def move_to(obj, device):
+    # 自动递归地将嵌套dict list的obj转化到cuda上
+    if torch.is_tensor(obj):
+        return obj.to(device)
+    elif isinstance(obj, dict):
+        return {k:move_to(v, device) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [move_to(v, device) for v in obj]
+    else:
+        raise TypeError("Invalid type for move_to")
+        
 def split_dataset(data,train_rate=0.8):
     shuffle(data)
     dl=len(data)
