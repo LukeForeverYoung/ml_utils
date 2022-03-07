@@ -19,3 +19,10 @@ def cartesian_cat(a,b):
     tmp_b=repeat(b,'B len_b dim_b -> B len_a len_b dim_b',len_a=a.shape[1])
     res=torch.cat([tmp_a,tmp_b],dim=-1)
     return res
+
+def mask_to_zero(v,m):
+    return v*m
+
+def mask_to_neg_inf(v,m):
+    m = (1.0 - m) * -10000.0
+    return m+v
