@@ -1,4 +1,7 @@
 
+from utils.dict_tree import Tree
+
+
 def tensor_like(ref_tensor,shape,create_fn):
     '''
     产生与ref_tensor同(device, type) 但shape自定的tensor
@@ -26,3 +29,25 @@ def mask_to_zero(v,m):
 def mask_to_neg_inf(v,m):
     m = (1.0 - m) * -10000.0
     return m+v
+
+def tree_weights(weights):
+    from utils.dict_tree import Tree,dfs
+    if isinstance(weights,dict):
+        names=list(weights.keys())
+    elif isinstance(weights,list):
+        names=weights
+    else:
+        return
+    tree=Tree()
+    for name in names:
+        tree.insert(name)
+    dfs(tree)
+
+if __name__ == '__main__':
+    from torchvision import models
+    
+    tree = Tree()
+    vgg16 = models.vgg16(pretrained=False)
+    state_dict = vgg16.state_dict()
+    tree_weights(state_dict)
+    
